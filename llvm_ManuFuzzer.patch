@@ -1,0 +1,175 @@
+diff --git a/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp b/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
+index 04f569a1a879..7e94b239c905 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
+@@ -31,6 +31,25 @@ void ClearExtraCounters() {  // hand-written memset, don't asan-ify.
+ 
+ }  // namespace fuzzer
+ 
++#elif LIBFUZZER_APPLE
++#include <stdio.h>
++#include <string.h>
++
++#define PCS_N (1 << 16)
++extern uint8_t* LibFuzzCounters;
++
++namespace fuzzer {
++uint8_t *ExtraCountersBegin() {  return LibFuzzCounters; }
++uint8_t *ExtraCountersEnd() {  return LibFuzzCounters+PCS_N; }
++ATTRIBUTE_NO_SANITIZE_ALL
++void ClearExtraCounters() {
++  uintptr_t *Beg = reinterpret_cast<uintptr_t*>(ExtraCountersBegin());
++  uintptr_t *End = reinterpret_cast<uintptr_t*>(ExtraCountersEnd());
++  memset(LibFuzzCounters, 0, PCS_N);
++}
++
++}  // namespace fuzzer
++
+ #else
+ // TODO: implement for other platforms.
+ namespace fuzzer {
+diff --git a/compiler-rt/lib/fuzzer/FuzzerMain.cpp b/compiler-rt/lib/fuzzer/FuzzerMain.cpp
+index 75f2f8e75c9b..7a1f26a39ec3 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerMain.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerMain.cpp
+@@ -11,11 +11,8 @@
+ #include "FuzzerDefs.h"
+ #include "FuzzerPlatform.h"
+ 
+-extern "C" {
+-// This function should be defined by the user.
+-int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size);
+-}  // extern "C"
+-
+-ATTRIBUTE_INTERFACE int main(int argc, char **argv) {
++typedef int (*UserCallback)(const uint8_t *Data, size_t Size);
++extern "C" int libFuzzerStart(int argc, char **argv, UserCallback LLVMFuzzerTestOneInput)
++{
+   return fuzzer::FuzzerDriver(&argc, &argv, LLVMFuzzerTestOneInput);
+ }
+diff --git a/compiler-rt/lib/fuzzer/build.sh b/compiler-rt/lib/fuzzer/build.sh
+index 504e54e3a819..962bfd7a7c6b 100755
+--- a/compiler-rt/lib/fuzzer/build.sh
++++ b/compiler-rt/lib/fuzzer/build.sh
+@@ -5,7 +5,7 @@ for f in $LIBFUZZER_SRC_DIR/*.cpp; do
+   $CXX -g -O2 -fno-omit-frame-pointer -std=c++11 $f -c &
+ done
+ wait
+-rm -f libFuzzer.a
+-ar ru libFuzzer.a Fuzzer*.o
+-rm -f Fuzzer*.o
++# rm -f libFuzzer.a
++# ar ru libFuzzer.a Fuzzer*.o
++# rm -f Fuzzer*.o
+ 
+diff --git a/llvm/include/llvm-c/Disassembler.h b/llvm/include/llvm-c/Disassembler.h
+index b1cb35da6687..c59f03ef5b1d 100644
+--- a/llvm/include/llvm-c/Disassembler.h
++++ b/llvm/include/llvm-c/Disassembler.h
+@@ -87,6 +87,12 @@ int LLVMSetDisasmOptions(LLVMDisasmContextRef DC, uint64_t Options);
+  */
+ void LLVMDisasmDispose(LLVMDisasmContextRef DC);
+ 
++struct LLVMDisasmInstructionRes {
++  size_t OutStringSize;
++  bool isBranch;
++};
++
++
+ /**
+  * Disassemble a single instruction using the disassembler context specified in
+  * the parameter DC.  The bytes of the instruction are specified in the
+@@ -97,7 +103,7 @@ void LLVMDisasmDispose(LLVMDisasmContextRef DC);
+  * function returns the number of bytes in the instruction or zero if there was
+  * no valid instruction.
+  */
+-size_t LLVMDisasmInstruction(LLVMDisasmContextRef DC, uint8_t *Bytes,
++struct LLVMDisasmInstructionRes LLVMDisasmInstruction(LLVMDisasmContextRef DC, uint8_t *Bytes,
+                              uint64_t BytesSize, uint64_t PC,
+                              char *OutString, size_t OutStringSize);
+ 
+diff --git a/llvm/lib/MC/MCDisassembler/Disassembler.cpp b/llvm/lib/MC/MCDisassembler/Disassembler.cpp
+index ff56695e8cc4..fa3098aaffd5 100644
+--- a/llvm/lib/MC/MCDisassembler/Disassembler.cpp
++++ b/llvm/lib/MC/MCDisassembler/Disassembler.cpp
+@@ -17,6 +17,7 @@
+ #include "llvm/MC/MCDisassembler/MCRelocationInfo.h"
+ #include "llvm/MC/MCDisassembler/MCSymbolizer.h"
+ #include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCInstrAnalysis.h"
+ #include "llvm/MC/MCInstPrinter.h"
+ #include "llvm/MC/MCInstrDesc.h"
+ #include "llvm/MC/MCInstrInfo.h"
+@@ -249,7 +250,12 @@ static void emitLatency(LLVMDisasmContext *DC, const MCInst &Inst) {
+ // returns zero the caller will have to pick how many bytes they want to step
+ // over by printing a .byte, .long etc. to continue.
+ //
+-size_t LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
++// struct LLVMDisasmInstructionRes {
++//   size_t OutStringSize;
++//   bool isBranch;
++// };
++
++struct LLVMDisasmInstructionRes LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
+                              uint64_t BytesSize, uint64_t PC, char *OutString,
+                              size_t OutStringSize){
+   LLVMDisasmContext *DC = static_cast<LLVMDisasmContext *>(DCR);
+@@ -268,28 +274,43 @@ size_t LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
+   case MCDisassembler::Fail:
+   case MCDisassembler::SoftFail:
+     // FIXME: Do something different for soft failure modes?
+-    return 0;
++      {
++        struct LLVMDisasmInstructionRes res = {
++        .isBranch = 0,
++        .OutStringSize = 0
++      };
++      return res;
++    }
++    // return 0;
+ 
+   case MCDisassembler::Success: {
+-    StringRef AnnotationsStr = Annotations.str();
++    // StringRef AnnotationsStr = Annotations.str();
++
++    // SmallVector<char, 64> InsnStr;
++    // raw_svector_ostream OS(InsnStr);
++    // formatted_raw_ostream FormattedOS(OS);
++    // IP->printInst(&Inst, PC, AnnotationsStr, *DC->getSubtargetInfo(),
++    //               FormattedOS);
+ 
+-    SmallVector<char, 64> InsnStr;
+-    raw_svector_ostream OS(InsnStr);
+-    formatted_raw_ostream FormattedOS(OS);
+-    IP->printInst(&Inst, PC, AnnotationsStr, *DC->getSubtargetInfo(),
+-                  FormattedOS);
++    // if (DC->getOptions() & LLVMDisassembler_Option_PrintLatency)
++    //   emitLatency(DC, Inst);
+ 
+-    if (DC->getOptions() & LLVMDisassembler_Option_PrintLatency)
+-      emitLatency(DC, Inst);
++    // emitComments(DC, FormattedOS);
+ 
+-    emitComments(DC, FormattedOS);
++    // assert(OutStringSize != 0 && "Output buffer cannot be zero size");
++    // size_t OutputSize = std::min(OutStringSize-1, InsnStr.size());
++    // std::memcpy(OutString, InsnStr.data(), OutputSize);
++    // OutString[OutputSize] = '\0'; // Terminate string.
+ 
+-    assert(OutStringSize != 0 && "Output buffer cannot be zero size");
+-    size_t OutputSize = std::min(OutStringSize-1, InsnStr.size());
+-    std::memcpy(OutString, InsnStr.data(), OutputSize);
+-    OutString[OutputSize] = '\0'; // Terminate string.
++    uint64_t Target;
++    std::unique_ptr<const llvm::MCInstrAnalysis> MIA(DC->getTarget()->createMCInstrAnalysis(DC->getInstrInfo()));
++    bool isBranch = MIA->evaluateBranch(Inst, PC, Size, Target);
++    struct LLVMDisasmInstructionRes res = {
++      .isBranch = isBranch,
++      .OutStringSize = Size
++    };
+ 
+-    return Size;
++    return res;
+   }
+   }
+   llvm_unreachable("Invalid DecodeStatus!");
