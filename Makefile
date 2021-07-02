@@ -13,12 +13,12 @@ CFLAGS =
 CXXFLAGS = 
 FUZZ_EXAMPLE_CFLAGS =  -framework Foundation -framework CoreGraphics -framework AppKit -framework CoreText -framework Foundation -framework CoreGraphics -lManuFuzzer
 
-LLVMFLAGS = -I/Users/ant4g0nist/Desktop/fuzzing.science/llvmMC/llvm-project/llvm/include -I/Users/ant4g0nist/Desktop/fuzzing.science/llvmMC/llvm-project/build/include -std=c++14  -fno-exceptions -fno-rtti -D_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+LLVMFLAGS = -I./llvm-project/llvm/include -I./llvm-project/build/include -std=c++14  -fno-exceptions -fno-rtti -D_DEBUG -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
 
-LLVMLDFLAGS = -L/Users/ant4g0nist/Desktop/fuzzing.science/llvmMC/llvm-project/build/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVMAArch64AsmParser -lLLVMAArch64Desc -lLLVMAArch64Disassembler -lLLVMAArch64Info -lLLVMAArch64Utils -lLLVMBinaryFormat -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMDemangle -lLLVMMC -lLLVMMCDisassembler -lLLVMMCParser -lLLVMSupport -lLLVMTableGen -lLLVMTableGenGlobalISel -lz -lpthread -ledit -lcurses -lm
+LLVMLDFLAGS = -L./llvm-project/build/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVMAArch64AsmParser -lLLVMAArch64Desc -lLLVMAArch64Disassembler -lLLVMAArch64Info -lLLVMAArch64Utils -lLLVMBinaryFormat -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMDemangle -lLLVMMC -lLLVMMCDisassembler -lLLVMMCParser -lLLVMSupport -lLLVMTableGen -lLLVMTableGenGlobalISel -lz -lpthread -ledit -lcurses -lm
 
 .DEFAULT_GOAL := build
-.PHONY: clean examples basicBlocker
+.PHONY: clean examples
 
 llvm_project:
 # build llvm-mc and llvm-config
