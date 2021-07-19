@@ -130,7 +130,7 @@ To compile the example:
 - [ ] test, test and tesssttt
 - [ ] fuzz, fuzzzz and more fuzzzzz
 
-## Trofies
+## Trophies
 let me know if you have found any vulnerabilities using this and will add it here :)
 
 ## Thanks 🙌🏻🙌🏻
