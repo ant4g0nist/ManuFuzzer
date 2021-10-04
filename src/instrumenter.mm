@@ -22,7 +22,6 @@
 #include <mach/machine.h>
 #include <mach-o/loader.h>
 #import <mach/vm_page_size.h>
-#include <capstone/capstone.h>
 #include <mach-o/dyld_images.h>
 #include <Foundation/Foundation.h>
 
