@@ -22,12 +22,12 @@ LLVMLDFLAGS = -L./llvm-project/build/lib -Wl,-search_paths_first -Wl,-headerpad_
 
 llvm_project:
 # build llvm-mc and llvm-config
-	git clone --branch llvmorg-12.0.1-rc3 https://github.com/llvm/llvm-project
-	cd llvm-project && git apply --stat ../llvm_ManuFuzzer.patch && git apply --check ../llvm_ManuFuzzer.patch && git apply ../llvm_ManuFuzzer.patch
-	mkdir -p llvm-project/build && cd llvm-project/build && cmake ../llvm && make llvm-config && make llvm-mc
+	# git clone --branch llvmorg-12.0.1-rc3 https://github.com/llvm/llvm-project
+	# cd llvm-project && git apply --stat ../llvm_ManuFuzzer.patch && git apply --check ../llvm_ManuFuzzer.patch && git apply ../llvm_ManuFuzzer.patch
+	# mkdir -p llvm-project/build && cd llvm-project/build && cmake ../llvm && make llvm-config && make llvm-mc
 
 # build libFuzzer
-	cd llvm-project/compiler-rt/lib/fuzzer  && ./build.sh
+	# cd llvm-project/compiler-rt/lib/fuzzer  && ./build.sh
 
 disassembler.o:
 	$(shell mkdir bin)
@@ -40,7 +40,7 @@ instrumenter.o:
 	$(CXX) $(FUZZ) $(CXXFLAGS) $(LLVMFLAGS) -c -o bin/$@ src/instrumenter.mm
 
 build: llvm_project disassembler.o coverage.o instrumenter.o
-	$(CXX) $(FUZZ)  $(CXXFLAGS) $(LLVMFLAGS) $(LLVMLDFLAGS) ./llvm-project/compiler-rt/lib/fuzzer/*.o bin/*.o -dynamiclib -o bin/libManuFuzzer.dylib
+	$(CXX) $(FUZZ)  $(CXXFLAGS) $(LLVMFLAGS) $(LLVMLDFLAGS) ./llvm-project/compiler-rt/lib/fuzzer/*.o bin/*.o -dynamiclib -o bin/libManuFuzzer.dylib -framework Foundation -framework CoreFoundation -framework CoreGraphics
 	cp src/libManuFuzzer.h bin/libManuFuzzer.h
 	rm bin/*.o
 

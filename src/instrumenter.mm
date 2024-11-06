@@ -27,167 +27,198 @@
 
 task_t task;
 extern uint8_t *LibFuzzCounters;
+
+// Structure to hold Mach-O parsing context
+typedef struct {
+    void* baseAddress;
+    struct mach_header_64* header;
+    void* loadCommandsBuffer;
+    boolean_t swapBytes;
+} MachOContext;
+
+// Structure to hold segment processing context
+typedef struct {
+    vm_address_t address;
+    vm_size_t size;
+    uint32_t slide;
+    void* shadowAddr;
+} SegmentContext;
+
 ////////////////////////////////////////////////////////////////////////////////
-//////////////////////////  MACHO //////////////////////////////////////////////
+// Error handling utilities
 ////////////////////////////////////////////////////////////////////////////////
-// https://opensource.apple.com/source/dyld/dyld-195.5/include/mach-o/dyld_images.h.auto.html
-/*
- *	Beginning in Mac OS X 10.4, this is how gdb discovers which mach-o images are loaded in a process.
- *
- *	gdb looks for the symbol "_dyld_all_image_infos" in dyld.  It contains the fields below.  
- *
- *	For a snashot of what images are currently loaded, the infoArray fields contain a pointer
- *	to an array of all images. If infoArray is NULL, it means it is being modified, come back later.
- *
-*/
-void* findLibraryLoadAddress(const char* libraryFilePath)
-{
-	task_dyld_info_data_t task_dyld_info;
-	mach_msg_type_number_t dyld_info_count = TASK_DYLD_INFO_COUNT;
 
-	kern_return_t kr = task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&task_dyld_info, &dyld_info_count);
-	if (kr!=KERN_SUCCESS)
-		fatal("failed to get task info");
-
-	const struct dyld_all_image_infos* all_image_infos = (const struct dyld_all_image_infos*) task_dyld_info.all_image_info_addr;
-
-	const struct dyld_image_info* image_infos = all_image_infos->infoArray;
-
-	dlogn("infoArrayCount: %x\n", all_image_infos->infoArrayCount);
-
-	for(size_t i = 0; i < all_image_infos->infoArrayCount; i++)
-	{
-		const char* imageFilePath = image_infos[i].imageFilePath;
-		mach_vm_address_t imageLoadAddress = (mach_vm_address_t)image_infos[i].imageLoadAddress;
-		if (strstr(imageFilePath, libraryFilePath))
-		{
-			return (void*) imageLoadAddress;
-		}
-	}
-
-	fatal("Failed to find load address of %s", libraryFilePath);
-	return NULL;
+static kern_return_t setSegmentProtection(vm_address_t addr, vm_size_t size, vm_prot_t protection) {
+    kern_return_t kr = vm_protect((vm_map_t)task, addr, size, false, protection);
+    if (kr != KERN_SUCCESS) {
+        fatal("Failed to set segment protection at addr: %llx, protection: %d", addr, protection);
+    }
+    return kr;
 }
 
-void getMachHeader(void *mach_header_address, struct mach_header_64 *mach_header)
-{
-	struct mach_header_64* header = (struct mach_header_64*) mach_header_address;
-	dlogn("mach_header->magic %x", header->magic);
-	*mach_header = *header;
+////////////////////////////////////////////////////////////////////////////////
+// Mach-O parsing utilities
+////////////////////////////////////////////////////////////////////////////////
+
+static void* findLibraryLoadAddress(const char* libraryFilePath) {
+    task_dyld_info_data_t task_dyld_info;
+    mach_msg_type_number_t dyld_info_count = TASK_DYLD_INFO_COUNT;
+
+    kern_return_t kr = task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&task_dyld_info, &dyld_info_count);
+    if (kr != KERN_SUCCESS) {
+        fatal("Failed to get task info");
+    }
+
+    const struct dyld_all_image_infos* all_image_infos = 
+        (const struct dyld_all_image_infos*)task_dyld_info.all_image_info_addr;
+    const struct dyld_image_info* image_infos = all_image_infos->infoArray;
+
+    dlogn("infoArrayCount: %x", all_image_infos->infoArrayCount);
+
+    for (size_t i = 0; i < all_image_infos->infoArrayCount; i++) {
+        if (strstr(image_infos[i].imageFilePath, libraryFilePath)) {
+            return (void*)image_infos[i].imageLoadAddress;
+        }
+    }
+
+    fatal("Failed to find load address of %s", libraryFilePath);
+    return NULL;
 }
 
-void getLoadCommandsBuffer(void *mach_header_address, const struct mach_header_64 *mach_header, void **load_commands)
-{
-	*load_commands = (void*)((uint64_t)mach_header_address + sizeof(struct mach_header_64));
+static void initializeMachOContext(void* address, MachOContext* ctx) {
+    ctx->baseAddress = address;
+    ctx->header = (struct mach_header_64*)address;
+    ctx->swapBytes = (ctx->header->magic == MH_CIGAM || 
+                     ctx->header->magic == MH_CIGAM_64 || 
+                     ctx->header->magic == FAT_CIGAM);
+    ctx->loadCommandsBuffer = (void*)((uint64_t)address + sizeof(struct mach_header_64));
 }
 
-struct section_64 *getSection(void * section_address, const int index, const int swapBytes)
-{
-	struct section_64 *section = (struct section_64 *) malloc(sizeof(struct section_64));
-	memcpy(section, section_address, sizeof(struct section_64));
-	
-	if (swapBytes)
-	{
-		swap_section_64(section, 1, NX_UnknownByteOrder);
-	}
+static struct section_64* getSection(void* section_address, int index, boolean_t swapBytes) {
+    struct section_64* section = (struct section_64*)malloc(sizeof(struct section_64));
+    if (!section) {
+        fatal("Failed to allocate memory for section");
+    }
 
-	return section;	
+    memcpy(section, section_address, sizeof(struct section_64));
+    
+    if (swapBytes) {
+        swap_section_64(section, 1, NX_UnknownByteOrder);
+    }
+
+    return section;
 }
 
-void parseAndInstrument(const char * module, uint32_t* baseAddress)
-{
-	kern_return_t kr;
-	struct mach_header_64 mach_header;
-	getMachHeader(baseAddress, &mach_header);
+////////////////////////////////////////////////////////////////////////////////
+// Segment processing
+////////////////////////////////////////////////////////////////////////////////
 
-	boolean_t swapBytes = false;
-	if (mach_header.magic == MH_CIGAM || mach_header.magic == MH_CIGAM_64 || mach_header.magic == FAT_CIGAM)
-		swapBytes = true;	
+static void* setupShadowMemory(void* lib_page_start, vm_size_t size) {
+    if ((uintptr_t)lib_page_start % vm_page_size != 0) {
+        lib_page_start = (void*)pageAlign(lib_page_start);
+    }
 
-	void *load_commands_buffer = NULL;
-	getLoadCommandsBuffer(baseAddress, &mach_header, &load_commands_buffer);
+    void* shadowAddr = shadowMeUp(lib_page_start);
+    dlogn("Shadow starts at: %llx", (uint64_t)shadowAddr);
 
-	uint64_t offset = 0;
-	uint32_t moduleSize = 0;
+    void* shadow = mmap(shadowAddr, size + vm_page_size, 
+                       PROT_READ | PROT_WRITE, 
+                       MAP_PRIVATE | MAP_ANON | MAP_FIXED, 0, 0);
 
-	for (int i = 0; i < mach_header.ncmds; ++i)
-	{
-		struct load_command *load_cmd = (struct load_command *)((uint64_t)load_commands_buffer + offset);
-		struct segment_command_64 *segment_cmd = (struct segment_command_64*) load_cmd;
-		
-		if (load_cmd->cmd == LC_SEGMENT_64 && strcmp(segment_cmd->segname, "__TEXT") == 0)
-		{
-			dlogn("base address: %llx", baseAddress);
-			uint64_t addr = (uint64_t)(baseAddress + offset);
-			uint32_t segSize = pageAlignEnd(segment_cmd->vmsize);
-			uint32_t slide  = (uint64_t)baseAddress - segment_cmd->vmaddr;
+    if (shadow == MAP_FAILED) {
+        fatal("Failed to mmap shadow memory: %s", strerror(errno));
+    }
 
-			//lets' triger COW on module so we can put breakpoints
-			kern_return_t kr = vm_protect((vm_map_t)task, (vm_address_t)addr, (vm_size_t)segSize, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    return shadow;
+}
 
-			if (kr != KERN_SUCCESS)
-				fatal("failed to make segment addr: %llx as writable", addr);
+static void processTextSegment(struct segment_command_64* segment_cmd, MachOContext* ctx) {
+    SegmentContext segCtx = {
+        .address = (vm_address_t)((uint64_t)ctx->baseAddress),
+        .size = pageAlignEnd(segment_cmd->vmsize),
+        .slide = (uint32_t)((uint64_t)ctx->baseAddress - segment_cmd->vmaddr)
+    };
 
-			uint64_t sections_offset = 0;
-			void* sections_base = (void*) ((uint64_t)segment_cmd + sizeof(struct segment_command_64));
+    // Make segment writable for instrumentation
+    setSegmentProtection(segCtx.address, segCtx.size, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
 
-            uint8_t* lib_page_start = (uint8_t*)baseAddress;
-            if ((uintptr_t)lib_page_start % vm_page_size != 0)
-			{
-                lib_page_start = (uint8_t*)pageAlign(baseAddress);
+    // Setup shadow memory
+    segCtx.shadowAddr = setupShadowMemory((void*)segCtx.address, segCtx.size);
+
+    // Process sections
+    void* sections_base = (void*)((uint64_t)segment_cmd + sizeof(struct segment_command_64));
+    uint64_t sections_offset = 0;
+
+    for (int isect = 0; isect < segment_cmd->nsects; isect++) {
+        void* sect_address = (void*)((uint64_t)sections_base + sections_offset);
+        struct section_64* sect = getSection(sect_address, isect, ctx->swapBytes);
+
+        if (sect->flags & (S_ATTR_SOME_INSTRUCTIONS | S_ATTR_PURE_INSTRUCTIONS)) {
+            size_t size;
+            uint8_t* data = (uint8_t*)getsectiondata(
+                (const struct mach_header_64*)ctx->baseAddress,
+                "__TEXT",
+                sect->sectname,
+                &size
+            );
+
+            instrumentASection((uint32_t*)ctx->baseAddress, 
+                             (uint64_t)segCtx.shadowAddr, 
+                             data, 
+                             size);
+        }
+
+        free(sect);
+        sections_offset += sizeof(struct section_64);
+    }
+
+    // Restore segment protection
+    setSegmentProtection(segCtx.address, segCtx.size, VM_PROT_READ | VM_PROT_EXECUTE);
+}
+
+static void processLoadCommands(MachOContext* ctx) {
+    uint64_t offset = 0;
+    struct mach_header_64* header = ctx->header;
+
+    for (int i = 0; i < header->ncmds; ++i) {
+        struct load_command* load_cmd = 
+            (struct load_command*)((uint64_t)ctx->loadCommandsBuffer + offset);
+        
+        if (load_cmd->cmd == LC_SEGMENT_64) {
+            struct segment_command_64* segment_cmd = (struct segment_command_64*)load_cmd;
+            
+            if (strcmp(segment_cmd->segname, "__TEXT") == 0) {
+                processTextSegment(segment_cmd, ctx);
             }
-
-			void* shadowAddr =  shadowMeUp(lib_page_start);
-			dlogn("Shadow starts at: %llx %lx %lx", (uint64_t ) shadowAddr, segment_cmd->vmsize, pageAlignEnd(0x200000000));
-
-			uint32_t *shadow = (uint32_t *)mmap(shadowAddr, segSize + vm_page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON| MAP_FIXED, 0, 0);
-
-			if(shadow == MAP_FAILED)
-			{
-				fatal("Failed to mmap shadow memory: %s", strerror(errno));
-			}
-
-			for (int isect = 0; isect < segment_cmd->nsects; isect++)
-			{	
-				uint64_t sect_address = (uint64_t)sections_base + sections_offset;
-				struct section_64 * sect = getSection( (void*)( sect_address), isect, swapBytes);
-				
-				if (sect->flags & S_ATTR_SOME_INSTRUCTIONS || sect->flags & S_ATTR_PURE_INSTRUCTIONS )
-				{
-					size_t size;
-					uint8_t *data = (uint8_t *) getsectiondata((const struct mach_header_64 *)baseAddress, "__TEXT", sect->sectname, &size);
-					
-					instrumentASection(baseAddress, (uint64_t)shadowAddr, data, size);
-				}
-				
-				free(sect);
-				sections_offset += sizeof(struct section_64);
-			}
-
-			kr = vm_protect((vm_map_t)task, (vm_address_t)addr, (vm_size_t)segSize, false, VM_PROT_READ | VM_PROT_EXECUTE);
-			
-			if (kr != KERN_SUCCESS)
-				fatal("failed to make segment addr: %llx as executable", addr);
-
-		}
-	
-		offset += load_cmd->cmdsize;
-	}
+        }
+        
+        offset += load_cmd->cmdsize;
+    }
 }
 
-extern "C" int instrumentMe(const char * libraryFilePath)
-{   
-	llvmInitialize();
-	void * loadAddr = findLibraryLoadAddress(libraryFilePath);
+////////////////////////////////////////////////////////////////////////////////
+// Main instrumentation interface
+////////////////////////////////////////////////////////////////////////////////
 
-	if (!task)
-	{
-		kern_return_t kr = task_for_pid(mach_task_self(), getpid(), &task);
-		if (kr!=KERN_SUCCESS)
-			fatal("failed to get task_for_pid");
-	}
+extern "C" int instrumentMe(const char* libraryFilePath) {
+    llvmInitialize();
+    
+    void* loadAddr = findLibraryLoadAddress(libraryFilePath);
+    if (!loadAddr) {
+        return -1;
+    }
 
-	parseAndInstrument(libraryFilePath, (uint32_t*)loadAddr);
-	dlogn("instrumentMe %s done", libraryFilePath);
-	return 0;
+    if (!task) {
+        kern_return_t kr = task_for_pid(mach_task_self(), getpid(), &task);
+        if (kr != KERN_SUCCESS) {
+            fatal("Failed to get task_for_pid");
+        }
+    }
+
+    MachOContext ctx;
+    initializeMachOContext(loadAddr, &ctx);
+    processLoadCommands(&ctx);
+
+    dlogn("instrumentMe %s done", libraryFilePath);
+    return 0;
 }
