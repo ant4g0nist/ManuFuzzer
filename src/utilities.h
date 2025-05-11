@@ -2,8 +2,6 @@
 //  utilities.h
 //  ManuFuzzer
 //
-//  Created by ant4g0nist
-//
 #ifndef utilities_h
 #define utilities_h
 #include <stdio.h>
@@ -18,8 +16,7 @@
 #define pageAlign(addr) (vm_address_t)((uintptr_t)(addr) & (~(vm_page_size - 1)))
 #define pageAlignEnd(addr) (vm_address_t) (((addr/vm_page_size)+1) * vm_page_size )
 
-// Simple shadow memory offset
-#define shadowMeUp(addr) ((void*)(((uintptr_t)addr) + 0x200000000))
+// Shadow memory mapping is now handled properly in instrumenter.mm
 
 #if FUZZ
     #define dlogn(...)  {}

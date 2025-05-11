@@ -16,7 +16,6 @@ extern "C" {
 #endif
 
 void llvmInitialize(void);
-int instrumentASection(uint32_t* baseAddress, uint64_t shadow, uint8_t *section_data, size_t section_size);
 int instrumentASectionWithMapping(uint32_t* baseAddress, uint64_t segmentBase, uint64_t shadowBase,
                                  uint8_t *section_data, size_t section_size);
 

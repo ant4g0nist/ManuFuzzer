@@ -2,11 +2,12 @@
 //  instrumenter.mm
 //  ManuFuzzer
 //
-//  Created by ant4g0nist
-//
 
-#include <sys/types.h>  // For u_int, u_char, etc.
-#include <sys/mman.h>   // For MAP_ANON
+#include <sys/types.h>
+#include <sys/mman.h>
+#include <mach/vm_statistics.h>
+#include <mach/host_info.h>
+#include <mach/mach_host.h>
 
 #include "coverage.h"
 #include "utilities.h"
@@ -40,25 +41,90 @@ extern "C" void registerShadowMapping(uint64_t moduleBase, uint64_t shadowBase, 
 task_t task;
 // Global list to keep track of mmap'd regions for cleanup
 static std::vector<std::pair<void*, size_t>> g_shadow_regions_to_unmap;
-// Global set to track base addresses of modules whose __TEXT segments have had shadow memory allocated
+// Global set to track base addresses of modules with shadow memory
 static std::unordered_set<uint32_t*> g_modules_with_shadow_memory;
-// Global map to track all shadow memory allocations and find free regions
+// Global map to track all shadow memory allocations
 static std::map<uint64_t, size_t> g_shadow_memory_map;
 // Counter for unique shadow memory regions
 static uint64_t g_shadow_region_counter = 0;
 extern uint8_t *LibFuzzCounters;
 
-// C++ implementation of the cleanup logic
+// Shadow memory pool for memory efficiency
+static struct {
+    void* base;
+    size_t size;
+    size_t used;
+    pthread_mutex_t mutex;
+} g_shadow_pool = {nullptr, 0, 0, PTHREAD_MUTEX_INITIALIZER};
+
+// Initialize shadow memory pool
+static bool initializeShadowPool() {
+    // Pre-allocate a large shadow memory pool (256MB)
+    const size_t POOL_SIZE = 256 * 1024 * 1024;
+
+    g_shadow_pool.base = mmap(nullptr, POOL_SIZE,
+                             PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (g_shadow_pool.base == MAP_FAILED) {
+        dlogn("Failed to allocate shadow memory pool: %s", strerror(errno));
+        return false;
+    }
+
+    g_shadow_pool.size = POOL_SIZE;
+    g_shadow_pool.used = 0;
+    return true;
+}
+
+// Allocate from shadow pool
+static void* allocateFromShadowPool(size_t size) {
+    // Align size to page boundary
+    size = (size + vm_page_size - 1) & ~(vm_page_size - 1);
+
+    pthread_mutex_lock(&g_shadow_pool.mutex);
+
+    if (!g_shadow_pool.base) {
+        if (!initializeShadowPool()) {
+            pthread_mutex_unlock(&g_shadow_pool.mutex);
+            return nullptr;
+        }
+    }
+
+    if (g_shadow_pool.used + size > g_shadow_pool.size) {
+        pthread_mutex_unlock(&g_shadow_pool.mutex);
+        return nullptr; // Pool exhausted
+    }
+
+    void* result = (char*)g_shadow_pool.base + g_shadow_pool.used;
+    g_shadow_pool.used += size;
+
+    pthread_mutex_unlock(&g_shadow_pool.mutex);
+    return result;
+}
+
+// cleanup logic
 static void actualManuFuzzerCleanup() {
-    printf("\033[0;32m[ManuFuzzer]\033[0m Cleaning up %zu shadow memory regions.\n", g_shadow_regions_to_unmap.size());
+    dlogn("Cleaning up %zu shadow memory regions", g_shadow_regions_to_unmap.size());
+
     for (const auto& region : g_shadow_regions_to_unmap) {
         if (munmap(region.first, region.second) == -1) {
-            fprintf(stderr, "\033[0;32m[ManuFuzzer]\033[0m Warning: Failed to munmap shadow region at %p (size %zu): %s\n",
+            dlogn("Warning: Failed to munmap shadow region at %p (size %zu): %s",
                     region.first, region.second, strerror(errno));
         }
     }
     g_shadow_regions_to_unmap.clear();
-    printf("\033[0;32m[ManuFuzzer]\033[0m Shadow memory cleanup complete.\n");
+
+    // Cleanup shadow pool
+    pthread_mutex_lock(&g_shadow_pool.mutex);
+    if (g_shadow_pool.base) {
+        munmap(g_shadow_pool.base, g_shadow_pool.size);
+        g_shadow_pool.base = nullptr;
+        g_shadow_pool.size = 0;
+        g_shadow_pool.used = 0;
+    }
+    pthread_mutex_unlock(&g_shadow_pool.mutex);
+
+    dlogn("Shadow memory cleanup complete");
 }
 
 struct LibraryInfo {
@@ -66,7 +132,7 @@ struct LibraryInfo {
     const char* path;
 };
 
-// Helper functions need to be outside extern "C" since they return C++ types
+// These helper functions need to be outside extern "C" since they return C++ types
 std::vector<LibraryInfo> findLibraryLoadAddresses(const char* libraryFilePath)
 {
     std::vector<LibraryInfo> result;
@@ -136,6 +202,28 @@ void* findFreeShadowRegion(size_t size) {
     return (void*)(SHADOW_BASE + (g_shadow_region_counter++ * 0x10000000ULL));
 }
 
+// Check available memory
+static bool checkAvailableMemory(size_t requiredMB) {
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t host_size = sizeof(vm_stat) / sizeof(natural_t);
+
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                         (host_info64_t)&vm_stat, &host_size) == KERN_SUCCESS) {
+        uint64_t free_memory = vm_stat.free_count * vm_page_size;
+        uint64_t inactive_memory = vm_stat.inactive_count * vm_page_size;
+        uint64_t available_memory = free_memory + inactive_memory;
+
+        uint64_t required_bytes = requiredMB * 1024 * 1024;
+
+        dlogn("Available memory: %llu MB (need %zu MB)",
+              available_memory / (1024*1024), requiredMB);
+
+        return available_memory >= required_bytes;
+    }
+
+    return true; // Assume there's enough if we can't check
+}
+
 extern "C" {
 
 void* findLibraryLoadAddress(const char* libraryFilePath)
@@ -164,8 +252,7 @@ struct section_64 *getSection(void * section_address, const int /* index */, con
     struct section_64 *section = (struct section_64 *) malloc(sizeof(struct section_64));
     memcpy(section, section_address, sizeof(struct section_64));
 
-    if (swapBytes)
-    {
+    if (swapBytes) {
         // swap_section_64 is deprecated, manually swap the fields
         // For simplicity, we'll skip byte swapping since most macOS binaries are native endian
         dlogn("WARNING: Byte swapping requested but not implemented for sections");
@@ -195,6 +282,21 @@ void parseAndInstrument(const char *module_name, uint32_t* baseAddress)
     uint64_t offset = 0;
     bool shadow_memory_allocated_for_this_module = false;
 
+    // Find the base VM address of the first segment to calculate slide
+    uint64_t image_base_vmaddr = 0;
+    {
+        uint64_t search_offset = 0;
+        for (unsigned int search_i = 0; search_i < mach_header.ncmds; ++search_i) {
+            struct load_command *search_cmd = (struct load_command *)((uint64_t)load_commands_buffer + search_offset);
+            if (search_cmd->cmd == LC_SEGMENT_64) {
+                struct segment_command_64 *first_seg = (struct segment_command_64*)search_cmd;
+                image_base_vmaddr = first_seg->vmaddr;
+                break;
+            }
+            search_offset += search_cmd->cmdsize;
+        }
+    }
+
     for (unsigned int i = 0; i < mach_header.ncmds; ++i)
     {
         struct load_command *load_cmd = (struct load_command *)((uint64_t)load_commands_buffer + offset);
@@ -205,34 +307,21 @@ void parseAndInstrument(const char *module_name, uint32_t* baseAddress)
             dlogn("Processing __TEXT segment for module %s (base %p)", module_name, baseAddress);
             dlogn("base address: %p", baseAddress);
 
-            // Calculate actual segment address in memory
-            // For loaded modules, we need to calculate the slid address
-            // baseAddress is the load address from dyld_all_image_infos
-
             // Calculate the slide (ASLR offset)
-            uint64_t image_base_vmaddr = 0;
-            bool found_first_segment = false;
-
-            // Search for the first segment to get base vmaddr
-            uint64_t search_offset = 0;
-            for (unsigned int search_i = 0; search_i < mach_header.ncmds && !found_first_segment; ++search_i)
-            {
-                struct load_command *search_cmd = (struct load_command *)((uint64_t)load_commands_buffer + search_offset);
-                if (search_cmd->cmd == LC_SEGMENT_64)
-                {
-                    struct segment_command_64 *first_seg = (struct segment_command_64*)search_cmd;
-                    image_base_vmaddr = first_seg->vmaddr;
-                    found_first_segment = true;
-                }
-                search_offset += search_cmd->cmdsize;
-            }
-
             uint64_t slide = (uint64_t)baseAddress - image_base_vmaddr;
 
             // Calculate the actual runtime address of the segment
             uint64_t addr = segment_cmd->vmaddr + slide;
 
             uint32_t segSize = pageAlignEnd(segment_cmd->vmsize);
+
+            // Skip if memory is low
+            if (segSize > 50 * 1024 * 1024 && !checkAvailableMemory(segSize / (1024 * 1024) * 2)) {
+                dlogn("Skipping large segment (low memory): %s (size=%u MB)",
+                    segment_cmd->segname, segSize / (1024 * 1024));
+                offset += load_cmd->cmdsize;
+                continue;
+            }
 
             dlogn("Segment %s: vmaddr=0x%llx, slide=0x%llx, runtime_addr=0x%llx, size=0x%x",
                   segment_cmd->segname, segment_cmd->vmaddr, slide, addr, segSize);
@@ -246,52 +335,45 @@ void parseAndInstrument(const char *module_name, uint32_t* baseAddress)
                 fatal("Failed to make segment addr: %llx as writable (error: %d)", addr, kr);
             }
 
-            uint64_t sections_offset = 0;
-            void* sections_base = (void*) ((uint64_t)segment_cmd + sizeof(struct segment_command_64));
+            // Try to allocate from shadow pool first
+            void* shadowAddr = allocateFromShadowPool(segSize);
 
-            // Calculate required shadow memory size
-            // Since we're not compressing, we use 1:1 mapping
-            uint32_t shadowSize = segSize;
+            if (!shadowAddr) {
+                // Fallback to finding a free region
+                dlogn("Shadow pool allocate failed, using regular mmap");
+                shadowAddr = findFreeShadowRegion(segSize);
+                shadowAddr = mmap(shadowAddr, segSize, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-            // Find a free shadow memory region
-            void* shadowAddr = findFreeShadowRegion(shadowSize);
+                if (shadowAddr == MAP_FAILED) {
+                    dlogn("ERROR: Failed to allocate shadow memory for %s: %s",
+                          module_name, strerror(errno));
 
-            dlogn("Shadow allocation: module=%s, runtime_addr=%p, shadow_addr=%p, size=%u",
-                  module_name, (void*)addr, shadowAddr, shadowSize);
-
-            // Allocate shadow memory without MAP_FIXED first
-            uint32_t *shadow = (uint32_t *)mmap(shadowAddr, shadowSize, PROT_READ | PROT_WRITE,
-                                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-            if(shadow == MAP_FAILED || shadow != shadowAddr)
-            {
-                // If we didn't get the exact address we wanted, use the allocated address
-                if (shadow == MAP_FAILED) {
-                    fatal("Failed to allocate shadow memory (size %u): %s", shadowSize, strerror(errno));
+                    // Clean up and restore protection
+                    vm_protect((vm_map_t)task, (vm_address_t)addr, (vm_size_t)segSize,
+                              false, VM_PROT_READ | VM_PROT_EXECUTE);
+                    offset += load_cmd->cmdsize;
+                    continue;
                 }
 
-                shadowAddr = shadow;
-                dlogn("Shadow memory allocated at %p (different from requested)", shadow);
+                // Register for cleanup
+                g_shadow_regions_to_unmap.push_back({shadowAddr, segSize});
             }
 
-            dlogn("Successfully allocated shadow memory at %p for module %s", shadow, module_name);
+            dlogn("Shadow allocation: module=%s, addr=%p, shadow=%p, size=%u",
+                  module_name, (void*)addr, shadowAddr, segSize);
 
             // Track this shadow allocation
-            g_shadow_memory_map[(uint64_t)shadowAddr] = shadowSize;
-
-            // Store the shadow base for this module
-            // We'll need to properly calculate the mapping for each instruction
-            // This is a per-module shadow base that we can use for translation
-
-            // Register shadow region for cleanup
-            g_shadow_regions_to_unmap.push_back({static_cast<void*>(shadow), shadowSize});
+            g_shadow_memory_map[(uint64_t)shadowAddr] = segSize;
             shadow_memory_allocated_for_this_module = true;
 
-            // Register this shadow mapping with the coverage handler
+            // Register with coverage handler
+            registerShadowMapping(addr, (uint64_t)shadowAddr, segSize);
 
-            registerShadowMapping(addr, (uint64_t)shadow, segSize);
+            // Process sections
+            uint64_t sections_offset = 0;
+            void* sections_base = (void*)((uint64_t)segment_cmd + sizeof(struct segment_command_64));
 
-            // Process sections within the __TEXT segment
             for (unsigned int isect = 0; isect < segment_cmd->nsects; isect++)
             {
                 uint64_t sect_address = (uint64_t)sections_base + sections_offset;
@@ -299,22 +381,27 @@ void parseAndInstrument(const char *module_name, uint32_t* baseAddress)
 
                 if (sect->flags & S_ATTR_SOME_INSTRUCTIONS || sect->flags & S_ATTR_PURE_INSTRUCTIONS)
                 {
+                    // Skip large sections if memory is low
+                    if (sect->size > 20 * 1024 * 1024 && !checkAvailableMemory(20)) {
+                        dlogn("Skipping large section (low memory): %s (size=%llu MB)",
+                             sect->sectname, sect->size / (1024 * 1024));
+                        free(sect);
+                        sections_offset += sizeof(struct section_64);
+                        continue;
+                    }
+
                     size_t size;
-                    // getsectiondata returns the virtual address of the section data
                     uint8_t *data = (uint8_t *) getsectiondata((const struct mach_header_64 *)baseAddress,
                                                               "__TEXT", sect->sectname, &size);
 
                     if (data) {
-                        // Calculate the offset of this section from the segment start
                         uint64_t sect_offset = sect->addr - segment_cmd->vmaddr;
-                        // Calculate the actual runtime address of the section data
                         uint8_t *runtime_section_addr = (uint8_t*)addr + sect_offset;
 
-                        dlogn("Instrumenting section %s: virtual addr=%p, runtime addr=%p, size=%zu",
-                              sect->sectname, data, runtime_section_addr, size);
+                        dlogn("Instrumenting section %s: runtime addr=%p, size=%zu",
+                              sect->sectname, runtime_section_addr, size);
 
-                        // Pass the runtime address, segment start, and shadow base to instrumentASection
-                        instrumentASectionWithMapping(baseAddress, (uint64_t)addr, (uint64_t)shadowAddr,
+                        instrumentASectionWithMapping(baseAddress, addr, (uint64_t)shadowAddr,
                                                     runtime_section_addr, size);
                     } else {
                         dlogn("Warning: getsectiondata returned NULL for module %s, section %s",
@@ -347,6 +434,11 @@ void parseAndInstrument(const char *module_name, uint32_t* baseAddress)
 int instrumentMe(const char * libraryFilePath)
 {
     llvmInitialize();
+
+    // Check available memory before starting
+    if (!checkAvailableMemory(500)) {
+        dlogn("WARNING: Low memory available. Instrumentation may be limited.");
+    }
 
     if (!task)
     {
