@@ -13,11 +13,11 @@ ManuFuzzer is an LLVM-based binary, coverage-guided fuzzing framework for macOS.
 ManuFuzzer makes use of custom breakpoint handlers and LLVM's disassembly capabilities:
 
 1. **Branch Identification**: ManuFuzzer uses LLVM MC to accurately identify branch instructions in the binary.
- 
+
 2. **Instrumentation**: When you select a module to instrument, ManuFuzzer replaces branch instructions with breakpoint instructions. If the module resides in the dyld shared cache, ManuFuzzer also identifies and instruments related modules that share memory pages to ensure comprehensive coverage.
- 
+
 3. **Shadow Memory**: For each instrumented module (or group of related modules from the dyld cache), ManuFuzzer allocates a dedicated shadow memory region. The original instructions from the instrumented locations are copied to this shadow memory. A dynamic mapping between the original code addresses and their corresponding shadow memory locations is maintained.
- 
+
 4. **Runtime Tracking**: Every time a breakpoint (instrumented location) is hit, ManuFuzzer's custom SIGTRAP handler:
     * Looks up the original instruction in the shadow memory using the dynamic mapping.
     * Updates coverage information for that basic-block.
@@ -211,7 +211,6 @@ An example showing how to fuzz CoreGraphics APIs is included in the `examples` d
 - [x] Replace Capstone with LLVM MC
 - [x] Add support for macOS on Apple Silicon (M1/M2)
 - [x] Integrate with libFuzzer's mutation engine
-- [x] Create CoreAudioFuzz example
 - [ ] Add support for macOS on Intel
 - [ ] Expand documentation and examples
 - [ ] Add more fuzzing targets
