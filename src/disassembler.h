@@ -1,15 +1,27 @@
 //
-//  llvm_mc.h
+//  disassembler.h
 //  ManuFuzzer
 //
 //  Created by ant4g0nist
 //
 
-#ifndef ManuFuzzer_DISASSEMBLER_H
-#define ManuFuzzer_DISASSEMBLER_H
+#ifndef disassembler_h
+#define disassembler_h
 
-void llvmInitialize();
-int disassemble(uint8_t* bytes, int size);
-int instrumentASection(uint32_t* baseAddress, uint64_t shadow, uint8_t *section_data, size_t section_size);
+#include <stdint.h>
+#include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+void llvmInitialize(void);
+int instrumentASection(uint32_t* baseAddress, uint64_t shadow, uint8_t *section_data, size_t section_size);
+int instrumentASectionWithMapping(uint32_t* baseAddress, uint64_t segmentBase, uint64_t shadowBase,
+                                 uint8_t *section_data, size_t section_size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* disassembler_h */

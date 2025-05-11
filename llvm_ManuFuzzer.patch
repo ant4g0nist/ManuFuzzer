@@ -1,19 +1,22 @@
-diff --git a/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp b/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
-index 04f569a1a879..7e94b239c905 100644
---- a/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
-+++ b/compiler-rt/lib/fuzzer/FuzzerExtraCounters.cpp
-@@ -31,6 +31,25 @@ void ClearExtraCounters() {  // hand-written memset, don't asan-ify.
+diff --git a/compiler-rt/lib/fuzzer/FuzzerExtraCountersDarwin.cpp b/compiler-rt/lib/fuzzer/FuzzerExtraCountersDarwin.cpp
+index 2321ba8a3..1a95fe9d6 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerExtraCountersDarwin.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerExtraCountersDarwin.cpp
+@@ -12,11 +12,21 @@
+ #include <cstdint>
  
- }  // namespace fuzzer
- 
-+#elif LIBFUZZER_APPLE
+ #if LIBFUZZER_APPLE
 +#include <stdio.h>
 +#include <string.h>
 +
 +#define PCS_N (1 << 16)
 +extern uint8_t* LibFuzzCounters;
-+
-+namespace fuzzer {
+ 
+ namespace fuzzer {
+-uint8_t *ExtraCountersBegin() { return nullptr; }
+-uint8_t *ExtraCountersEnd() { return nullptr; }
+-void ClearExtraCounters() {}
+-} // namespace fuzzer
 +uint8_t *ExtraCountersBegin() {  return LibFuzzCounters; }
 +uint8_t *ExtraCountersEnd() {  return LibFuzzCounters+PCS_N; }
 +ATTRIBUTE_NO_SANITIZE_ALL
@@ -22,14 +25,11 @@ index 04f569a1a879..7e94b239c905 100644
 +  uintptr_t *End = reinterpret_cast<uintptr_t*>(ExtraCountersEnd());
 +  memset(LibFuzzCounters, 0, PCS_N);
 +}
-+
-+}  // namespace fuzzer
-+
- #else
- // TODO: implement for other platforms.
- namespace fuzzer {
+ 
++}
+ #endif
 diff --git a/compiler-rt/lib/fuzzer/FuzzerMain.cpp b/compiler-rt/lib/fuzzer/FuzzerMain.cpp
-index 75f2f8e75c9b..7a1f26a39ec3 100644
+index 75f2f8e75..7a1f26a39 100644
 --- a/compiler-rt/lib/fuzzer/FuzzerMain.cpp
 +++ b/compiler-rt/lib/fuzzer/FuzzerMain.cpp
 @@ -11,11 +11,8 @@
@@ -48,7 +48,7 @@ index 75f2f8e75c9b..7a1f26a39ec3 100644
    return fuzzer::FuzzerDriver(&argc, &argv, LLVMFuzzerTestOneInput);
  }
 diff --git a/compiler-rt/lib/fuzzer/build.sh b/compiler-rt/lib/fuzzer/build.sh
-index 504e54e3a819..962bfd7a7c6b 100755
+index 504e54e3a..962bfd7a7 100755
 --- a/compiler-rt/lib/fuzzer/build.sh
 +++ b/compiler-rt/lib/fuzzer/build.sh
 @@ -5,7 +5,7 @@ for f in $LIBFUZZER_SRC_DIR/*.cpp; do
@@ -63,7 +63,7 @@ index 504e54e3a819..962bfd7a7c6b 100755
 +# rm -f Fuzzer*.o
  
 diff --git a/llvm/include/llvm-c/Disassembler.h b/llvm/include/llvm-c/Disassembler.h
-index b1cb35da6687..c59f03ef5b1d 100644
+index b1cb35da6..c59f03ef5 100644
 --- a/llvm/include/llvm-c/Disassembler.h
 +++ b/llvm/include/llvm-c/Disassembler.h
 @@ -87,6 +87,12 @@ int LLVMSetDisasmOptions(LLVMDisasmContextRef DC, uint64_t Options);
@@ -89,7 +89,7 @@ index b1cb35da6687..c59f03ef5b1d 100644
                               char *OutString, size_t OutStringSize);
  
 diff --git a/llvm/lib/MC/MCDisassembler/Disassembler.cpp b/llvm/lib/MC/MCDisassembler/Disassembler.cpp
-index ff56695e8cc4..fa3098aaffd5 100644
+index aaa3b7476..8d04f466b 100644
 --- a/llvm/lib/MC/MCDisassembler/Disassembler.cpp
 +++ b/llvm/lib/MC/MCDisassembler/Disassembler.cpp
 @@ -17,6 +17,7 @@
@@ -100,7 +100,7 @@ index ff56695e8cc4..fa3098aaffd5 100644
  #include "llvm/MC/MCInstPrinter.h"
  #include "llvm/MC/MCInstrDesc.h"
  #include "llvm/MC/MCInstrInfo.h"
-@@ -249,7 +250,12 @@ static void emitLatency(LLVMDisasmContext *DC, const MCInst &Inst) {
+@@ -250,7 +251,12 @@ static void emitLatency(LLVMDisasmContext *DC, const MCInst &Inst) {
  // returns zero the caller will have to pick how many bytes they want to step
  // over by printing a .byte, .long etc. to continue.
  //
@@ -114,7 +114,7 @@ index ff56695e8cc4..fa3098aaffd5 100644
                               uint64_t BytesSize, uint64_t PC, char *OutString,
                               size_t OutStringSize){
    LLVMDisasmContext *DC = static_cast<LLVMDisasmContext *>(DCR);
-@@ -268,28 +274,43 @@ size_t LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
+@@ -269,28 +275,43 @@ size_t LLVMDisasmInstruction(LLVMDisasmContextRef DCR, uint8_t *Bytes,
    case MCDisassembler::Fail:
    case MCDisassembler::SoftFail:
      // FIXME: Do something different for soft failure modes?
