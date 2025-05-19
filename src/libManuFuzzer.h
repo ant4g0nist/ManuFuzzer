@@ -14,11 +14,24 @@
 typedef int (*UserCallback)(const uint8_t *Data, size_t Size);
 
 extern "C" {
+    // Function to install signal handlers for coverage tracking
     void installHandlers(void);
+
+    // Function to clean up fuzzer resources
     void libFuzzerCleanUp(void);
+
+    // Function for instrumentation
+    int instrumentMe(const char *libraryFilePath);
+
+    // Instrument a specific section with memory mapping
     int instrumentASectionWithMapping(uint32_t* baseAddress, uint64_t segmentBase, uint64_t shadowBase,
                                      uint8_t *section_data, size_t section_size);
+
+    // Start the fuzzing process
     int libFuzzerStart(int argc, char **argv, UserCallback LLVMFuzzerTestOneInput);
+
+    // Cleanup function for atexit registration
+    void manuFuzzerAtExitCleanup(void);
 }
 
 #endif

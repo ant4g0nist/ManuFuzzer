@@ -9,11 +9,13 @@
 #import <CoreText/CoreText.h>
 #include <stdlib.h> // For atexit
 
+// Include theheader for libManuFuzzer
 #include "src/libManuFuzzer.h"
 
 // Declare the cleanup function defined in instrumenter.mm
 extern "C" {
     void manuFuzzerAtExitCleanup();
+    int instrumentMe(const char * libraryFilePath);
 }
 
 // Define debug level
@@ -97,6 +99,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *fuzz_buff, size_t size)
         CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)fontData);
         if (!provider) {
             DEBUG_LOG("[-] Failed to create CGDataProvider\n");
+            in_font_processing = false;
             return 0;
         }
 
@@ -228,11 +231,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *fuzz_buff, size_t size)
 int main(int argc, char* argv[])
 {
     HARNESS_PRINTF("[*] ManuFuzzer Font Fuzzing Harness\n");
+
     // Register the cleanup function to be called on normal program termination
     if (atexit(manuFuzzerAtExitCleanup) != 0) {
-        HARNESS_FPRINTF_STDERR("[!] Warning: Failed to register atexit cleanup handler.\\n");
+        HARNESS_FPRINTF_STDERR("[!] Warning: Failed to register atexit cleanup handler.\n");
         // Not fatal, but good to know.
     }
+
     HARNESS_PRINTF("[*] Installing signal handlers for coverage collection...\n");
     installHandlers();
 
@@ -256,16 +261,17 @@ int main(int argc, char* argv[])
 
     for (int i = 0; frameworks[i] != NULL; i++) {
         HARNESS_PRINTF("[*] Instrumenting %s\n", frameworks[i]);
-        if (instrumentMe(frameworks[i]) == 0) {
+        int result = instrumentMe(frameworks[i]);
+        if (result == 0) {
             frameworkCount++;
             HARNESS_PRINTF("[+] Successfully instrumented: %s\n", frameworks[i]);
         } else {
             failedCount++;
-            printf("[!] Warning: Failed to instrument %s\n", frameworks[i]);
+            HARNESS_PRINTF("[!] Warning: Failed to instrument %s (error code: %d)\n", frameworks[i], result);
         }
     }
 
-    printf("[+] Successfully instrumented %d frameworks (%d failed)\n", frameworkCount, failedCount);
+    HARNESS_PRINTF("[+] Successfully instrumented %d frameworks (%d failed)\n", frameworkCount, failedCount);
 
     // Set fuzzing parameters to improve performance
     char *newArgv[argc + 10]; // Extra space for our additional parameters
@@ -290,14 +296,14 @@ int main(int argc, char* argv[])
         newArgv[newArgc++] = strdup(fuzzerParams[i]);
     }
 
-    printf("[*] Starting fuzzing engine with enhanced parameters...\n");
+    HARNESS_PRINTF("[*] Starting fuzzing engine with enhanced parameters...\n");
 
     // Add common fonts corpus directory if it exists and no corpus is specified
     if (argc == 1) {
         // Check if we have a corpus directory
         const char* corpusDir = "fonts_corpus";
         if (access(corpusDir, F_OK) != -1) {
-            printf("[*] Using default corpus directory: %s\n", corpusDir);
+            HARNESS_PRINTF("[*] Using default corpus directory: %s\n", corpusDir);
 
             // Add corpus directory to arguments
             newArgv[newArgc++] = strdup(corpusDir);
@@ -305,14 +311,18 @@ int main(int argc, char* argv[])
             // Create output corpus directory for new interesting test cases
             const char* outputDir = "output_corpus";
             mkdir(outputDir, 0755); // Create directory if it doesn't exist
-            printf("[*] Using output corpus directory: %s\n", outputDir);
+            HARNESS_PRINTF("[*] Using output corpus directory: %s\n", outputDir);
 
             newArgv[newArgc++] = strdup(outputDir);
-
-            return libFuzzerStart(newArgc, newArgv, LLVMFuzzerTestOneInput);
         }
     }
 
     // Even if we have custom corpus, add our options
-    return libFuzzerStart(newArgc, newArgv, LLVMFuzzerTestOneInput);
+    HARNESS_PRINTF("[*] Starting fuzzing with %d arguments\n", newArgc);
+    int result = libFuzzerStart(newArgc, newArgv, LLVMFuzzerTestOneInput);
+
+    // Clean up
+    libFuzzerCleanUp();
+
+    return result;
 }

@@ -1,5 +1,3 @@
-# ManuFuzzer Makefile
-
 # Default target
 all: build
 
@@ -66,9 +64,9 @@ SRC_DIR = src
 BUILD_DIR = build
 BIN_DIR = bin
 
-# Source files
+# Source files - IMPORTANT: filter out fuzzer_counters.cpp to avoid duplicate compilation
 LIB_MM_SOURCES = $(wildcard $(SRC_DIR)/*.mm)
-LIB_CPP_SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
+LIB_CPP_SOURCES = $(filter-out $(SRC_DIR)/fuzzer_counters.cpp, $(wildcard $(SRC_DIR)/*.cpp))
 LIB_MM_OBJECTS = $(patsubst $(SRC_DIR)/%.mm,$(BUILD_DIR)/%.o,$(LIB_MM_SOURCES))
 LIB_CPP_OBJECTS = $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(LIB_CPP_SOURCES))
 LIB_OBJECTS = $(LIB_MM_OBJECTS) $(LIB_CPP_OBJECTS)
@@ -113,7 +111,9 @@ ifeq ($(LIBFUZZER_OBJS_EXIST), 1)
 	$(info Building with direct LibFuzzer object files)
 	$(info Looking for libFuzzerStart in object files...)
 	@nm $(LIBFUZZER_OBJ_PATH)/FuzzerMain.o | grep -i libFuzzerStart || echo "Warning: libFuzzerStart symbol not found!"
-	$(CXX) -dynamiclib -o $@ $^ $(LIBFUZZER_OBJ_FILES) -Wl,-exported_symbol,_libFuzzerStart -Wl,-exported_symbol,_installHandlers -Wl,-exported_symbol,_instrumentMe -Wl,-exported_symbol,_manuFuzzerAtExitCleanup $(LDFLAGS)
+	# Compile fuzzer_counters.cpp separately since we filtered it out from automatic compilation
+	$(CXX) $(CXXFLAGS) -c src/fuzzer_counters.cpp -o build/fuzzer_counters.o
+	$(CXX) -dynamiclib -o $@ $^ build/fuzzer_counters.o $(LIBFUZZER_OBJ_FILES) -Wl,-exported_symbol,_libFuzzerStart -Wl,-exported_symbol,_installHandlers -Wl,-exported_symbol,_instrumentMe -Wl,-exported_symbol,_manuFuzzerAtExitCleanup -Wl,-exported_symbol,_LibFuzzCounters -Wl,-exported_symbol,_libFuzzerCleanUp $(LDFLAGS)
 	@nm $@ | grep -i libFuzzerStart || echo "Warning: libFuzzerStart symbol not found in final library!"
 else
 	$(info LibFuzzer object files not found, building without fuzzing engine)

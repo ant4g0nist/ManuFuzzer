@@ -29,6 +29,7 @@
 
 void updateCoverage(uint64_t curLoc);
 extern uint16_t previousLoc;
+extern "C" uint8_t *LibFuzzCounters;
 
 #ifdef __cplusplus
 extern "C" {
